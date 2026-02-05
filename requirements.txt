@@ -1,9 +1,8 @@
-# AgentBox Dependencies
-
 # Core dependencies
 openai>=1.12.0           # OpenAI Python SDK for chat completions and tool calling
 python-dotenv>=1.0.0     # Environment variable management from .env files
 pyyaml>=6.0              # YAML parsing for policy files (used in Phase 3)
+requests>=2.31.0         # HTTP library for web_request tool
 
 # Development and testing
 pytest>=8.0.0            # Testing framework
