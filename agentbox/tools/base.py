@@ -1,77 +1,51 @@
-"""
-Base abstractions for safe tool execution.
-
-This module defines the SafeTool interface that all AgentBox tools must implement,
-providing a consistent execution model and OpenAI schema generation.
-"""
+"""Base interface for all AgentBox tools with OpenAI schema generation."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from agentbox.policy import Policy
 
 
 class SafeTool(ABC):
-    """
-    Abstract base class for all AgentBox tools.
-    
-    All tools must inherit from this class and implement the execute() method.
-    The class provides automatic schema generation for OpenAI function calling.
-    
-    Attributes:
-        name: Unique identifier for the tool
-        description: Human-readable description for the LLM
-        parameters: JSON Schema defining the tool's parameters
-    """
+    """All tools inherit from this class. Provides automatic OpenAI schema generation."""
     
     def __init__(self):
-        """Initialize the tool with its metadata."""
         self.name: str = self._get_name()
         self.description: str = self._get_description()
         self.parameters: Dict[str, Any] = self._get_parameters()
     
     @abstractmethod
     def _get_name(self) -> str:
-        """Return the tool's unique identifier."""
         pass
     
     @abstractmethod
     def _get_description(self) -> str:
-        """Return the tool's description for the LLM."""
         pass
     
     @abstractmethod
     def _get_parameters(self) -> Dict[str, Any]:
-        """
-        Return the JSON Schema for the tool's parameters.
-        
-        Returns:
-            A dictionary following JSON Schema format with 'type', 'properties',
-            and 'required' fields.
-        """
+        """Return JSON Schema for tool parameters."""
         pass
     
     @abstractmethod
     def execute(self, args: Dict[str, Any]) -> Any:
-        """
-        Execute the tool with the provided arguments.
-        
-        Args:
-            args: Dictionary of arguments matching the tool's parameter schema
-            
-        Returns:
-            The result of the tool execution (type depends on the specific tool)
-            
-        Raises:
-            Exception: If the tool execution fails
-        """
+        """Execute the tool with provided arguments."""
         pass
     
-    def to_openai_schema(self) -> Dict[str, Any]:
-        """
-        Convert the tool to OpenAI's function calling schema format.
+    def execute_with_policy(self, args: Dict[str, Any], policy: Optional["Policy"] = None) -> Any:
+        """Execute with optional policy validation. Raises PolicyDeniedError if denied."""
+        if policy:
+            from agentbox.policy import PolicyDeniedError
+            
+            decision = policy.validate(self.name, args)
+            if not decision.allowed:
+                raise PolicyDeniedError(decision.reason)
         
-        Returns:
-            A dictionary in OpenAI's tool schema format with 'type' and 'function' fields.
-        """
+        return self.execute(args)
+    
+    def to_openai_schema(self) -> Dict[str, Any]:
+        """Convert to OpenAI function calling format."""
         return {
             "type": "function",
             "function": {
@@ -80,3 +54,4 @@ class SafeTool(ABC):
                 "parameters": self.parameters
             }
         }
+
