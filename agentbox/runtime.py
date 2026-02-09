@@ -1,11 +1,14 @@
 """Agent runtime loop with policy enforcement and budget limits."""
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from agentbox.model import BaseModelClient
 from agentbox.policy import Policy, PolicyDeniedError
 from agentbox.tools import SafeTool
+
+if TYPE_CHECKING:
+    from agentbox.logger import AuditLogger
 
 
 class BudgetExceededError(Exception):
@@ -25,11 +28,13 @@ class AgentRuntime:
         self,
         model_client: BaseModelClient,
         tools: List[SafeTool],
-        policy: Policy
+        policy: Policy,
+        logger: Optional["AuditLogger"] = None
     ):
         self.model_client = model_client
         self.tools = {tool.name: tool for tool in tools}
         self.policy = policy
+        self.logger = logger
     
     def run(
         self,
@@ -44,45 +49,53 @@ class AgentRuntime:
         start_time = time.time()
         tool_call_count = 0
         
-        for iteration in range(max_iterations):
-            # Budget enforcement
-            elapsed = time.time() - start_time
-            if elapsed > self.policy.max_runtime_seconds:
-                raise BudgetExceededError(
-                    f"Runtime limit exceeded: {elapsed:.1f}s > {self.policy.max_runtime_seconds}s"
-                )
+        try:
+            for iteration in range(max_iterations):
+                # Budget enforcement
+                elapsed = time.time() - start_time
+                if elapsed > self.policy.max_runtime_seconds:
+                    error_msg = f"Runtime limit exceeded: {elapsed:.1f}s > {self.policy.max_runtime_seconds}s"
+                    if self.logger:
+                        self.logger.log_runtime_error(error_msg)
+                    raise BudgetExceededError(error_msg)
+                
+                if tool_call_count >= self.policy.max_tool_calls:
+                    error_msg = f"Tool call limit exceeded: {tool_call_count} >= {self.policy.max_tool_calls}"
+                    if self.logger:
+                        self.logger.log_runtime_error(error_msg)
+                    raise BudgetExceededError(error_msg)
+                
+                # Get LLM response
+                tool_schemas = [t.to_openai_schema() for t in self.tools.values()]
+                content, tool_calls = self.model_client.chat(messages, tools=tool_schemas)
+                
+                # No tools called → agent is done
+                if not tool_calls:
+                    return content or ""
+                
+                # Execute tool calls
+                tool_results = []
+                for tc in tool_calls:
+                    result = self._execute_tool(tc)
+                    tool_results.append(result)
+                    tool_call_count += 1
+                
+                # Append assistant message with tool calls
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": self._format_tool_calls_for_openai(tool_calls)
+                })
+                
+                # Append tool results
+                messages.extend(tool_results)
             
-            if tool_call_count >= self.policy.max_tool_calls:
-                raise BudgetExceededError(
-                    f"Tool call limit exceeded: {tool_call_count} >= {self.policy.max_tool_calls}"
-                )
-            
-            # Get LLM response
-            tool_schemas = [t.to_openai_schema() for t in self.tools.values()]
-            content, tool_calls = self.model_client.chat(messages, tools=tool_schemas)
-            
-            # No tools called → agent is done
-            if not tool_calls:
-                return content or ""
-            
-            # Execute tool calls
-            tool_results = []
-            for tc in tool_calls:
-                result = self._execute_tool(tc)
-                tool_results.append(result)
-                tool_call_count += 1
-            
-            # Append assistant message with tool calls
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": self._format_tool_calls_for_openai(tool_calls)
-            })
-            
-            # Append tool results
-            messages.extend(tool_results)
+            raise MaxIterationsError(f"Max iterations ({max_iterations}) reached without completion")
         
-        raise MaxIterationsError(f"Max iterations ({max_iterations}) reached without completion")
+        except Exception as e:
+            if self.logger and not isinstance(e, (BudgetExceededError, MaxIterationsError)):
+                self.logger.log_runtime_error(str(e))
+            raise
     
     def _execute_tool(self, tool_invocation) -> Dict[str, Any]:
         """Execute single tool with policy validation."""
@@ -92,28 +105,37 @@ class AgentRuntime:
         
         # Check if tool exists
         if tool_name not in self.tools:
-            return self._tool_error_result(
-                call_id,
-                tool_name,
-                f"Tool '{tool_name}' not found"
-            )
+            error = f"Tool '{tool_name}' not found"
+            if self.logger:
+                self.logger.log_tool_result(tool_name, success=False, error=error)
+            return self._tool_error_result(call_id, tool_name, error)
         
         tool = self.tools[tool_name]
         
         # Validate against policy
         decision = self.policy.validate(tool_name, tool_args)
-        if not decision.allowed:
-            return self._tool_error_result(
-                call_id,
+        
+        if self.logger:
+            self.logger.log_tool_validation(
                 tool_name,
-                f"Policy denied: {decision.reason}"
+                tool_args,
+                decision.allowed,
+                decision.reason
             )
+        
+        if not decision.allowed:
+            error = f"Policy denied: {decision.reason}"
+            return self._tool_error_result(call_id, tool_name, error)
         
         # Execute tool
         try:
             result = tool.execute(tool_args)
+            if self.logger:
+                self.logger.log_tool_result(tool_name, success=True, result=str(result))
             return self._tool_success_result(call_id, tool_name, result)
         except Exception as e:
+            if self.logger:
+                self.logger.log_tool_result(tool_name, success=False, error=str(e))
             return self._tool_error_result(call_id, tool_name, str(e))
     
     def _tool_success_result(

@@ -7,6 +7,9 @@ from openai import OpenAI
 
 from .base import BaseModelClient, ToolInvocation
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class OpenAIClient(BaseModelClient):
     
